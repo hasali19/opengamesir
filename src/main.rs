@@ -1,86 +1,136 @@
 use std::collections::VecDeque;
-use std::io::Cursor;
+use std::time::{Duration, Instant};
 
-use byteorder::ReadBytesExt;
-use hidapi::{HidApi, HidDevice};
-use opengamesir::profile::ProfileParser;
-use opengamesir::{profile, state};
+use hidapi::HidApi;
+use opengamesir::profile::{self, ProfileParser};
+use opengamesir::state;
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
 
     let api = HidApi::new()?;
-
-    for device in api.device_list() {
-        println!(
-            "{} {:x}:{:x} - {:?} {} {:?} {:x} {:x}",
-            device.product_string().unwrap_or("unknown"),
-            device.vendor_id(),
-            device.product_id(),
-            device.path(),
-            device.interface_number(),
-            device.bus_type(),
-            device.usage(),
-            device.usage_page(),
-        );
-    }
-
     let device = api.open(0x3537, 0x100b)?;
 
-    let device_info = device.get_device_info()?;
-    println!("{device_info:?}");
-
-    const HEARTBEAT_COMMAND: &[u8] = &[15, 242, 0];
+    const HEARTBEAT_COMMAND: &[u8] = &[0xf, 0xf2, 0];
     const READ_FW_VERSION_COMMAND: &[u8] = &[15, 9];
 
-    // device.write(HEARTBEAT_COMMAND)?;
-    // device.write(READ_FW_VERSION_COMMAND)?;
-
-    let mut buf = vec![0u8; 2048];
-    let mut gamepad_state = vec![];
+    let mut read_buf = vec![0u8; 2048];
+    let mut write_queue = VecDeque::<RequestPacket>::new();
     let mut profile_parser = ProfileParser::new();
-    loop {
-        let len = device.read(&mut buf)?;
-        let buf = &buf[..len];
 
-        const GAMEPAD_STATE_REPORT_ID: u8 = 18;
-        if buf[0] == GAMEPAD_STATE_REPORT_ID {
-            if buf != gamepad_state {
-                gamepad_state.clear();
-                gamepad_state.extend_from_slice(buf);
-                state::parse_gamepad_state(&gamepad_state);
+    let request = Request::GetColorProfile;
+
+    match request {
+        Request::Heartbeat => {
+            write_queue.push_back(RequestPacket {
+                data: HEARTBEAT_COMMAND.to_vec(),
+                state: RequestPacketState::Queued,
+                needs_ack: false,
+            });
+        }
+        Request::GetColorProfile => {
+            for packet_data in profile::get_read_profile_command(true) {
+                write_queue.push_back(RequestPacket {
+                    data: packet_data.to_vec(),
+                    state: RequestPacketState::Queued,
+                    needs_ack: true,
+                });
             }
+        }
+        Request::GetFirmwareVersion => {
+            write_queue.push_back(RequestPacket {
+                data: READ_FW_VERSION_COMMAND.to_vec(),
+                state: RequestPacketState::Queued,
+                needs_ack: true,
+            });
+        }
+    }
+
+    loop {
+        while let Some(packet) = write_queue.front_mut() {
+            match packet.state {
+                RequestPacketState::Queued => {
+                    device.write(&packet.data)?;
+                }
+                RequestPacketState::WaitingForAck { timestamp } => {
+                    if Instant::now() > timestamp + Duration::from_millis(200) {
+                        eprintln!("timeout, resending");
+                        device.write(&packet.data)?;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            if packet.needs_ack {
+                packet.state = RequestPacketState::WaitingForAck {
+                    timestamp: Instant::now(),
+                };
+                break;
+            }
+
+            write_queue.pop_front();
+        }
+
+        let len = device.read_timeout(&mut read_buf, 20)?;
+        let buf = &read_buf[..len];
+
+        if buf.is_empty() {
             continue;
         }
 
-        const READ_FIRMWARE_VERSION_ACK: u8 = 10;
-        if buf[1] == READ_FIRMWARE_VERSION_ACK {
-            let fw_version = String::from_utf8_lossy(&buf[4..9]);
-            let dongle_version = String::from_utf8_lossy(&buf[12..17]);
-            println!("fw_version:     {fw_version}");
-            println!("dongle_version: {dongle_version}");
+        const GAMEPAD_STATE_REPORT_ID: u8 = 18;
+        if buf[0] == GAMEPAD_STATE_REPORT_ID {
+            state::parse_gamepad_state(buf);
+            continue;
         }
 
-        const READ_PROFILE_ACK: u8 = 5;
-        if buf[1] == READ_PROFILE_ACK {
-            let profile = match profile_parser.accept(&buf) {
-                Ok(profile) => profile,
-                Err(e) => {
-                    eprintln!("error parsing profile data packet: {e}");
-                    continue;
-                }
-            };
+        let Some(_) = write_queue
+            .pop_front_if(|p| matches!(p.state, RequestPacketState::WaitingForAck { .. }))
+        else {
+            unreachable!("unexpected message from device: {buf:?}");
+        };
 
-            if let Some(profile) = profile {
-                println!("{profile:#?}");
+        const READ_FIRMWARE_VERSION_ACK: u8 = 10;
+        const READ_PROFILE_ACK: u8 = 5;
+
+        match request {
+            Request::Heartbeat => unreachable!(),
+            Request::GetColorProfile => {
+                assert_eq!(buf[1], READ_PROFILE_ACK);
+
+                let profile = match profile_parser.accept(&buf) {
+                    Ok(profile) => profile,
+                    Err(e) => {
+                        eprintln!("error parsing profile data packet: {e}");
+                        continue;
+                    }
+                };
+
+                if let Some(profile) = profile {
+                    println!("{profile:#?}");
+                    break;
+                }
+            }
+            Request::GetFirmwareVersion => {
+                assert_eq!(buf[1], READ_FIRMWARE_VERSION_ACK);
+                let fw_version = String::from_utf8_lossy(&buf[4..9]);
+                let dongle_version = String::from_utf8_lossy(&buf[12..17]);
+                println!("fw_version:     {fw_version}");
+                println!("dongle_version: {dongle_version}");
+                break;
             }
         }
     }
+
+    Ok(())
 }
 
-struct Device {
-    hid_device: HidDevice,
-    send_queue: VecDeque<RequestPacket>,
+#[derive(Debug, PartialEq, Eq)]
+enum Request {
+    Heartbeat,
+    GetColorProfile,
+    GetFirmwareVersion,
 }
 
 struct RequestPacket {
@@ -89,24 +139,8 @@ struct RequestPacket {
     needs_ack: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
 enum RequestPacketState {
     Queued,
-    WaitingForAck,
-}
-
-impl Device {
-    pub fn new(hid_device: HidDevice) -> Device {
-        Device {
-            hid_device: hid_device,
-            send_queue: VecDeque::new(),
-        }
-    }
-
-    pub fn request(&mut self, req: Vec<u8>) {
-        self.send_queue.push_back(RequestPacket {
-            data: req,
-            state: RequestPacketState::Queued,
-            needs_ack: true,
-        });
-    }
+    WaitingForAck { timestamp: Instant },
 }

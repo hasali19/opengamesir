@@ -3,7 +3,6 @@ use std::io::{Cursor, Read, Write};
 use array_builder::ArrayBuilder;
 use byteorder::ReadBytesExt;
 use eyre::{bail, eyre};
-use hidapi::HidDevice;
 
 type Packet = [u8; 64];
 
@@ -42,8 +41,6 @@ impl ProfileParser {
         let start_index = 256 * data[3] as usize + data[4] as usize;
         let packet_data_length = data[5] as usize;
 
-        println!("{start_index} {packet_data_length} {}", data.len());
-
         let is_complete = {
             let target_packet_length = if profile_index == LIGHT_PROFILE_NUMBER {
                 635
@@ -78,7 +75,7 @@ impl ProfileParser {
     }
 }
 
-fn get_read_profile_command(is_light_profile: bool) -> Vec<Packet> {
+pub fn get_read_profile_command(is_light_profile: bool) -> Vec<Packet> {
     let mut t = PACKET_DATA_LENGTH;
     if is_light_profile {
         t = LIGHT_PROFILE_LENGTH;
