@@ -9,4 +9,8 @@ byteorder = "1.5.0"
 clap = { version = "4.5.54", features = ["derive"] }
 color-eyre = "0.6.5"
 eyre = "0.6.12"
+futures = "0.3.31"
 hidapi = "2.6.4"
+parking_lot = "0.12.5"
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
