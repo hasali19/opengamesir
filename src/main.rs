@@ -1,12 +1,21 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use hidapi::HidApi;
 use opengamesir::profile::{self, ProfileParser};
 use opengamesir::state;
 
+#[derive(clap::Parser)]
+enum Command {
+    GetColorProfile,
+    GetFirmwareVersion,
+}
+
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
+
+    let command = Command::parse();
 
     let api = HidApi::new()?;
     let device = api.open(0x3537, 0x100b)?;
@@ -18,7 +27,15 @@ fn main() -> eyre::Result<()> {
     let mut write_queue = VecDeque::<RequestPacket>::new();
     let mut profile_parser = ProfileParser::new();
 
-    let request = Request::GetColorProfile;
+    let request;
+    match command {
+        Command::GetColorProfile => {
+            request = Request::GetColorProfile;
+        }
+        Command::GetFirmwareVersion => {
+            request = Request::GetFirmwareVersion;
+        }
+    }
 
     match request {
         Request::Heartbeat => {
