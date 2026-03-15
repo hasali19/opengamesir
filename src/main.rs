@@ -1,4 +1,4 @@
-#![feature(try_blocks)]
+#![feature(if_let_guard, try_blocks)]
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use clap::Parser;
 use futures::channel::oneshot;
 use futures::executor;
 use hidapi::HidApi;
-use opengamesir::profile::{self, ProfileParser};
+use opengamesir::profile::{self, ProfileId, ProfileParser};
 use opengamesir::state;
 use parking_lot::Mutex;
 use tracing::level_filters::LevelFilter;
@@ -18,7 +18,8 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(clap::Parser)]
 enum Command {
-    GetColorProfile,
+    GetLightProfile,
+    GetProfile { profile_id: u8 },
     GetFirmwareVersion,
 }
 
@@ -48,9 +49,17 @@ struct Controller {
 }
 
 impl Controller {
-    async fn get_light_color_profile(&self) -> profile::Profile {
-        self.request(|result_sender| Request::GetColorProfile { result_sender })
+    async fn get_light_profile(&self) -> profile::Profile {
+        self.request(|result_sender| Request::GetLightProfile { result_sender })
             .await
+    }
+
+    async fn get_profile(&self, id: ProfileId) -> profile::Profile {
+        self.request(|result_sender| Request::GetProfile {
+            profile_id: id,
+            result_sender,
+        })
+        .await
     }
 
     async fn get_firmware_version(&self) -> FirmwareVersion {
@@ -108,8 +117,17 @@ fn main() -> eyre::Result<()> {
                             needs_ack: false,
                         });
                     }
-                    Request::GetColorProfile { .. } => {
-                        for packet_data in profile::get_read_profile_command(true) {
+                    Request::GetLightProfile { .. } => {
+                        for packet_data in profile::get_read_profile_command(ProfileId::Light) {
+                            write_queue.push_back(RequestPacket {
+                                data: packet_data.to_vec(),
+                                state: RequestPacketState::Queued,
+                                needs_ack: true,
+                            });
+                        }
+                    }
+                    Request::GetProfile { profile_id, .. } => {
+                        for packet_data in profile::get_read_profile_command(profile_id) {
                             write_queue.push_back(RequestPacket {
                                 data: packet_data.to_vec(),
                                 state: RequestPacketState::Queued,
@@ -191,12 +209,7 @@ fn main() -> eyre::Result<()> {
             const READ_PROFILE_ACK: u8 = 5;
 
             match buf[1] {
-                READ_PROFILE_ACK => {
-                    if !matches!(current_req, Some(Request::GetColorProfile { .. })) {
-                        warn!("unexpected READ_PROFILE_ACK");
-                        continue;
-                    }
-
+                READ_PROFILE_ACK if let Some(Request::GetLightProfile { .. }) = current_req => {
                     let profile = match profile_parser.accept(&buf) {
                         Ok(profile) => profile,
                         Err(e) => {
@@ -206,13 +219,35 @@ fn main() -> eyre::Result<()> {
                     };
 
                     if let Some(profile) = profile {
-                        let Some(Request::GetColorProfile { result_sender }) = current_req.take()
+                        let Some(Request::GetLightProfile { result_sender }) = current_req.take()
                         else {
                             unreachable!()
                         };
 
                         let _ = result_sender.send(profile);
                     }
+                }
+                READ_PROFILE_ACK if let Some(Request::GetProfile { .. }) = current_req => {
+                    let profile = match profile_parser.accept(&buf) {
+                        Ok(profile) => profile,
+                        Err(e) => {
+                            eprintln!("error parsing profile data packet: {e}");
+                            continue;
+                        }
+                    };
+
+                    if let Some(profile) = profile {
+                        let Some(Request::GetProfile { result_sender, .. }) = current_req.take()
+                        else {
+                            unreachable!()
+                        };
+
+                        let _ = result_sender.send(profile);
+                    }
+                }
+                READ_PROFILE_ACK => {
+                    warn!("unexpected READ_PROFILE_ACK");
+                    continue;
                 }
                 READ_FIRMWARE_VERSION_ACK => {
                     let Some(Request::GetFirmwareVersion { result_sender }) = current_req.take()
@@ -235,8 +270,24 @@ fn main() -> eyre::Result<()> {
 
     executor::block_on(async {
         match command {
-            Command::GetColorProfile => {
-                controller.get_light_color_profile().await;
+            Command::GetLightProfile => {
+                controller.get_light_profile().await;
+            }
+            Command::GetProfile { profile_id } => {
+                let profile = controller
+                    .get_profile(ProfileId::Num(match profile_id {
+                        1 => profile::ProfileNum::P1,
+                        2 => profile::ProfileNum::P2,
+                        3 => profile::ProfileNum::P3,
+                        4 => profile::ProfileNum::P4,
+                        _ => {
+                            eprintln!("invalid profile id: {profile_id}");
+                            return;
+                        }
+                    }))
+                    .await;
+
+                println!("{profile:#?}");
             }
             Command::GetFirmwareVersion => {
                 let version = controller.get_firmware_version().await;
@@ -251,7 +302,11 @@ fn main() -> eyre::Result<()> {
 
 enum Request {
     Heartbeat,
-    GetColorProfile {
+    GetProfile {
+        profile_id: ProfileId,
+        result_sender: oneshot::Sender<profile::Profile>,
+    },
+    GetLightProfile {
         result_sender: oneshot::Sender<profile::Profile>,
     },
     GetFirmwareVersion {
