@@ -31,6 +31,8 @@ impl<'a> Cyclone2<'a> {
     pub fn get_firmware_version(&self) -> eyre::Result<FirmwareVersion> {
         let res = self.write_acked_with_retry(&[0x0f, 0x09])?;
 
+        ensure!(&res[0..2] == &[0x10, 0x0a]);
+
         let controller_version = str::from_utf8(&res[4..=8])?.replace('\0', ".");
         let dongle_version = str::from_utf8(&res[12..=16])?.replace('\0', ".");
 
