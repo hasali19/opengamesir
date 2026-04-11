@@ -1,98 +1,24 @@
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Read, Seek, Write};
 
 use array_builder::ArrayBuilder;
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use eyre::bail;
-
-type Packet = [u8; 64];
-
-const PACKET_DATA_LENGTH: usize = 680;
-const LIGHT_PROFILE_LENGTH: usize = 635;
-const OUT_PACKET_DATA_LENGTH: usize = 58;
-
-const LIGHT_PROFILE_NUMBER: u8 = 32;
-
-#[derive(Debug)]
-pub enum Profile {
-    Control(ControlProfile),
-    Light(LightProfile),
-}
-
-pub struct ProfileParser {
-    light_buf: Vec<u8>,
-    profile_buf: Vec<u8>,
-}
-
-impl ProfileParser {
-    pub fn new() -> ProfileParser {
-        ProfileParser {
-            light_buf: vec![0; 635],
-            profile_buf: vec![0; 680],
-        }
-    }
-
-    /// Attempts to parse profile data from the specified buffer. The buffer is
-    /// expected to contain a READ_PROFILE_ACK message. Returns `Ok(Some(...))`
-    /// once a complete profile has been parsed, otherwise return `Ok(None)`.
-    pub fn accept(&mut self, data: &[u8]) -> eyre::Result<Option<Profile>> {
-        let profile_index = data[2];
-
-        let start_index = 256 * data[3] as usize + data[4] as usize;
-        let packet_data_length = data[5] as usize;
-
-        let is_complete = {
-            let target_packet_length = if profile_index == LIGHT_PROFILE_NUMBER {
-                635
-            } else {
-                680
-            };
-
-            let cumulative_packet_length = start_index + packet_data_length;
-
-            assert!(cumulative_packet_length <= target_packet_length);
-
-            if cumulative_packet_length == target_packet_length {
-                true
-            } else {
-                false
-            }
-        };
-
-        if profile_index == LIGHT_PROFILE_NUMBER {
-            self.light_buf.splice(
-                start_index..start_index + packet_data_length,
-                data[6..6 + packet_data_length].iter().copied(),
-            );
-        } else {
-            self.profile_buf.splice(
-                start_index..start_index + packet_data_length,
-                data[6..6 + packet_data_length].iter().copied(),
-            );
-        }
-
-        if !is_complete {
-            return Ok(None);
-        }
-
-        let profile = if profile_index == LIGHT_PROFILE_NUMBER {
-            let mut cursor = Cursor::new(&self.light_buf);
-            Profile::Light(LightProfile::read(&mut cursor)?)
-        } else {
-            let mut cursor = Cursor::new(&self.profile_buf);
-            let profile = Profile::Control(ControlProfile::read(&mut cursor)?);
-            assert_eq!(cursor.position() as usize, self.profile_buf.len());
-            profile
-        };
-
-        Ok(Some(profile))
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileId {
     Num(ProfileNum),
     Shift,
     Light,
+}
+
+impl ProfileId {
+    pub fn index(&self) -> u8 {
+        match self {
+            ProfileId::Num(profile_num) => profile_num.index(),
+            ProfileId::Shift => 5,
+            ProfileId::Light => 32,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,83 +29,15 @@ pub enum ProfileNum {
     P4,
 }
 
-pub fn get_read_profile_command(id: ProfileId) -> Vec<Packet> {
-    let mut t = PACKET_DATA_LENGTH;
-    if id == ProfileId::Light {
-        t = LIGHT_PROFILE_LENGTH;
+impl ProfileNum {
+    pub fn index(&self) -> u8 {
+        match self {
+            ProfileNum::P1 => 1,
+            ProfileNum::P2 => 2,
+            ProfileNum::P3 => 3,
+            ProfileNum::P4 => 4,
+        }
     }
-
-    let i = t.div_ceil(OUT_PACKET_DATA_LENGTH);
-
-    (0..i)
-        .map(|i| {
-            let mut packet = [0; 64];
-            let mut cursor = Cursor::new(packet.as_mut_slice());
-
-            cursor
-                .write_all(&[
-                    0x0f,
-                    4,
-                    match id {
-                        ProfileId::Num(profile_num) => match profile_num {
-                            ProfileNum::P1 => 1,
-                            ProfileNum::P2 => 2,
-                            ProfileNum::P3 => 3,
-                            ProfileNum::P4 => 4,
-                        },
-                        ProfileId::Shift => 5,
-                        ProfileId::Light => LIGHT_PROFILE_NUMBER,
-                    },
-                    ((i * OUT_PACKET_DATA_LENGTH) / 256).try_into().unwrap(),
-                    ((i * OUT_PACKET_DATA_LENGTH) % 256).try_into().unwrap(),
-                    t.min(OUT_PACKET_DATA_LENGTH).try_into().unwrap(),
-                ])
-                .unwrap();
-
-            t = t.saturating_sub(OUT_PACKET_DATA_LENGTH);
-
-            packet
-        })
-        .collect()
-}
-
-fn build_write_profile_command(data: &[u8], start_index: usize) -> Vec<Packet> {
-    let num_packets = data.len().div_ceil(OUT_PACKET_DATA_LENGTH);
-    let mut packets = Vec::with_capacity(num_packets);
-
-    let mut remaining_bytes = data.len();
-    for i in 0..num_packets {
-        let start_index = start_index + i * OUT_PACKET_DATA_LENGTH;
-        let mut packet = [0; 64];
-
-        const PROFILE_INDEX_LIGHT: u8 = 32;
-
-        let packet_data_size = remaining_bytes.min(OUT_PACKET_DATA_LENGTH);
-        let mut cursor = Cursor::new(packet.as_mut_slice());
-
-        cursor
-            .write_all(&[
-                15,
-                3,
-                PROFILE_INDEX_LIGHT,
-                (start_index / 256).try_into().unwrap(),
-                (start_index % 256).try_into().unwrap(),
-                packet_data_size.try_into().unwrap(),
-            ])
-            .unwrap();
-
-        let start_index = data.len() - remaining_bytes;
-
-        cursor
-            .write_all(&data[start_index..start_index + packet_data_size])
-            .unwrap();
-
-        packets.push(packet);
-
-        remaining_bytes -= packet_data_size;
-    }
-
-    packets
 }
 
 macro_rules! array_of {
@@ -518,6 +376,20 @@ impl LightProfile {
             reserved_data: array_of!(|| reader.read_u8()?),
         })
     }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.config_index)?;
+        for animation in &self.animations {
+            animation.write(writer)?;
+        }
+        writer.write_u8(self.audio_reactive_mode as u8)?;
+        writer.write_u8(self.user_effect_index)?;
+        self.profile_led.write(writer)?;
+        writer.write_u8(self.raise_wake_up as u8)?;
+        writer.write_u8(self.standby_time)?;
+        writer.write_all(&self.reserved_data)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -539,6 +411,17 @@ impl Animation {
             frames: array_of!(|| Frame::read(reader)?),
         })
     }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.key_frame_count)?;
+        writer.write_u8(self.effect_count)?;
+        writer.write_u8(self.speed)?;
+        writer.write_u8(self.brightness)?;
+        for frame in &self.frames {
+            frame.write(writer)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -551,6 +434,13 @@ impl Frame {
         Ok(Frame {
             leds: array_of!(|| RgbColor::read(reader)?),
         })
+    }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        for led in &self.leds {
+            led.write(writer)?;
+        }
+        Ok(())
     }
 }
 
@@ -568,5 +458,12 @@ impl RgbColor {
             green: reader.read_u8()?,
             blue: reader.read_u8()?,
         })
+    }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.red)?;
+        writer.write_u8(self.green)?;
+        writer.write_u8(self.blue)?;
+        Ok(())
     }
 }

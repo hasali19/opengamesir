@@ -1,2 +1,2 @@
-pub mod profile;
-pub mod state;
+pub mod driver;
+pub mod hid;

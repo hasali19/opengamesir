@@ -3,14 +3,18 @@ name = "opengamesir"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["hidapi-sys"]
+
 [dependencies]
 array_builder = "0.1.4"
 byteorder = "1.5.0"
 clap = { version = "4.5.54", features = ["derive"] }
 color-eyre = "0.6.5"
 eyre = "0.6.12"
-futures = "0.3.31"
-hidapi = "2.6.4"
+hidapi-sys = { version = "0.1.0", path = "hidapi-sys" }
+kanal = "0.1.1"
 parking_lot = "0.12.5"
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+widestring = "1.2.1"
