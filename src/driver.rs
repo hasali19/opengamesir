@@ -46,6 +46,16 @@ impl<'a> Cyclone2<'a> {
         ControlProfile::read(&mut cursor)
     }
 
+    pub fn set_control_profile(
+        &self,
+        num: ProfileNum,
+        profile: &ControlProfile,
+    ) -> eyre::Result<()> {
+        let mut bytes = Vec::with_capacity(680);
+        profile.write(&mut bytes)?;
+        self.write_profile(ProfileId::Num(num), &bytes)
+    }
+
     pub fn get_light_profile(&self) -> eyre::Result<LightProfile> {
         let profile_bytes = self.read_profile(ProfileId::Light, 635)?;
         let mut cursor = Cursor::new(&profile_bytes);

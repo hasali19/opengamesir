@@ -120,6 +120,43 @@ impl ControlProfile {
             tilt_sensor: MotionConfig::read(reader)?,
         })
     }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        let name_bytes = self.name.as_bytes();
+        let mut name_buf = [0u8; 32];
+        let len = name_bytes.len().min(32);
+        name_buf[..len].copy_from_slice(&name_bytes[..len]);
+        writer.write_all(&name_buf)?;
+        writer.write_u8(self.left_motor_value)?;
+        writer.write_u8(self.right_motor_value)?;
+        writer.write_u8(self.lt_motor_value)?;
+        writer.write_u8(self.rt_motor_value)?;
+        writer.write_u8(self.profile_audio_en)?;
+        writer.write_u8(self.audio_volume)?;
+        writer.write_u8(self.audio_mixer)?;
+        writer.write_u8(self.mic_mute)?;
+        writer.write_u8(self.mic_sensitivity)?;
+        writer.write_u8(self.shift_en)?;
+        writer.write_u8(self.shift_value)?;
+        writer.write_u8(self.dpad_diagonal_lock_en)?;
+        writer.write_u8(self.xinput_abxy_change)?;
+        writer.write_u8(self.switch_abxy_change)?;
+        writer.write_u8(self.report_rates_gears)?;
+        writer.write_all(&[0u8; 17])?;
+        for mapping in &self.mappings {
+            mapping.write(writer)?;
+        }
+        for fn_mapping in &self.fn_mappings {
+            fn_mapping.write(writer)?;
+        }
+        self.left_trigger.write(writer)?;
+        self.right_trigger.write(writer)?;
+        self.left_stick.write(writer)?;
+        self.right_stick.write(writer)?;
+        self.aim_sensor.write(writer)?;
+        self.tilt_sensor.write(writer)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -140,6 +177,15 @@ impl ButtonMapping {
             map: array_of!(|| reader.read_u8()?),
             toggle_en: reader.read_u8()?,
         })
+    }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.turbo_en)?;
+        writer.write_u8(self.turbo_speed)?;
+        writer.write_u8(self.map_en)?;
+        writer.write_all(&self.map)?;
+        writer.write_u8(self.toggle_en)?;
+        Ok(())
     }
 }
 
@@ -169,6 +215,21 @@ impl FunctionKeyConfig {
                 },
             }),
         })
+    }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        self.mapping.write(writer)?;
+        writer.write_u8(self.macro_open_status)?;
+        writer.write_u16::<BigEndian>(self.macro_cycle_time)?;
+        writer.write_u8(self.step_num)?;
+        for (i, step) in self.steps.iter().enumerate() {
+            writer.write_u8(step.step_data)?;
+            writer.write_u16::<BigEndian>(step.step_hold_time)?;
+            if i < 29 {
+                writer.write_u16::<BigEndian>(step.step_delay_time)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -227,6 +288,30 @@ impl TriggerConfig {
             linear_control_points: array_of!(|| (reader.read_u8()?, reader.read_u8()?)),
         })
     }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.turbo_en)?;
+        writer.write_u8(self.turbo_speed)?;
+        writer.write_u8(self.dead_en)?;
+        writer.write_u8(self.front_dead)?;
+        writer.write_u8(self.back_dead)?;
+        writer.write_u8(self.anti_front_dead)?;
+        writer.write_u8(self.anti_back_dead)?;
+        writer.write_u8(self.map_en)?;
+        writer.write_all(&self.map)?;
+        writer.write_u8(self.toggle_en)?;
+        writer.write_u8(self.quick_trigger_status)?;
+        writer.write_u8(self.quick_trigger_start_value)?;
+        writer.write_u8(self.quick_trigger_end_value)?;
+        writer.write_u8(self.linear_module_en)?;
+        writer.write_u8(self.linear_status)?;
+        writer.write_u8(self.linear_data)?;
+        for (a, b) in &self.linear_control_points {
+            writer.write_u8(*a)?;
+            writer.write_u8(*b)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -283,6 +368,36 @@ impl StickConfig {
             map_right_value: reader.read_u8()?,
             map_dead_value: reader.read_u8()?,
         })
+    }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.stick_en)?;
+        writer.write_u8(self.stick_square)?;
+        writer.write_u8(self.dead_en)?;
+        writer.write_u8(self.front_dead)?;
+        writer.write_u8(self.back_dead)?;
+        writer.write_u8(self.anti_front_dead)?;
+        writer.write_u8(self.anti_back_dead)?;
+        writer.write_u8(self.linear_module_en)?;
+        writer.write_u8(self.linear_status)?;
+        writer.write_u8(self.linear_data)?;
+        for (a, b) in &self.linear_control_points {
+            writer.write_u8(*a)?;
+            writer.write_u8(*b)?;
+        }
+        writer.write_u8(self.map_en)?;
+        writer.write_u8(self.x_flip)?;
+        writer.write_u8(self.y_flip)?;
+        writer.write_u8(self.axis_ratio)?;
+        writer.write_u8(self.mouse_dpi)?;
+        writer.write_u8(self.map_index)?;
+        writer.write_u8(self.map_cross)?;
+        writer.write_u8(self.map_up_value)?;
+        writer.write_u8(self.map_down_value)?;
+        writer.write_u8(self.map_left_value)?;
+        writer.write_u8(self.map_right_value)?;
+        writer.write_u8(self.map_dead_value)?;
+        Ok(())
     }
 }
 
@@ -342,6 +457,37 @@ impl MotionConfig {
             map_right_value: reader.read_u8()?,
             map_dead_value: reader.read_u8()?,
         })
+    }
+
+    pub fn write(&self, writer: &mut impl Write) -> eyre::Result<()> {
+        writer.write_u8(self.sensor_profile_status)?;
+        writer.write_u8(self.sensor_quick_key_value)?;
+        writer.write_u8(self.active_axis)?;
+        writer.write_u8(self.dead_en)?;
+        writer.write_u8(self.front_dead)?;
+        writer.write_u8(self.back_dead)?;
+        writer.write_u8(self.anti_front_dead)?;
+        writer.write_u8(self.anti_back_dead)?;
+        writer.write_u8(self.linear_module_en)?;
+        writer.write_u8(self.linear_status)?;
+        writer.write_u8(self.linear_data)?;
+        for (a, b) in &self.linear_control_points {
+            writer.write_u8(*a)?;
+            writer.write_u8(*b)?;
+        }
+        writer.write_u8(self.map_en)?;
+        writer.write_u8(self.x_flip)?;
+        writer.write_u8(self.y_flip)?;
+        writer.write_u8(self.axis_ratio)?;
+        writer.write_u8(self.mouse_dpi)?;
+        writer.write_u8(self.map_index)?;
+        writer.write_u8(self.map_cross)?;
+        writer.write_u8(self.map_up_value)?;
+        writer.write_u8(self.map_down_value)?;
+        writer.write_u8(self.map_left_value)?;
+        writer.write_u8(self.map_right_value)?;
+        writer.write_u8(self.map_dead_value)?;
+        Ok(())
     }
 }
 
