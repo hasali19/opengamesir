@@ -12,9 +12,22 @@ byteorder = "1.5.0"
 clap = { version = "4.5.54", features = ["derive"] }
 color-eyre = "0.6.5"
 eyre = "0.6.12"
+futures = "0.3.32"
 hidapi-sys = { version = "0.1.0", path = "hidapi-sys" }
 kanal = "0.1.1"
 parking_lot = "0.12.5"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.51.1", features = [
+    "rt",
+    "macros",
+    "net",
+    "sync",
+    "signal",
+] }
+tokio-stream = "0.1.18"
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+udev = "0.9.3"
+uuid = { version = "1.23.0", features = ["v4"] }
 widestring = "1.2.1"
+zbus = "5.14.0"
