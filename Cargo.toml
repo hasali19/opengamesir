@@ -15,7 +15,6 @@ eyre = "0.6.12"
 fixed-vec-deque = "0.1.11"
 futures = "0.3.32"
 hidapi-sys = { version = "0.1.0", path = "hidapi-sys" }
-kanal = "0.1.1"
 parking_lot = "0.12.5"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.51.1", features = [

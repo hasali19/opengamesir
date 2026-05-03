@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,7 @@ async fn main() -> eyre::Result<()> {
         .interface("/dev/hasali/OpenGameSir/Devices")
         .await?;
 
-    let (hid_sender, hid_receiver) = kanal::unbounded();
+    let (hid_sender, hid_receiver) = mpsc::channel();
 
     thread::Builder::new()
         .name("hid".to_owned())
@@ -193,7 +193,7 @@ enum HidReq {
     },
 }
 
-fn hid_thread(receiver: kanal::Receiver<HidReq>) -> eyre::Result<()> {
+fn hid_thread(receiver: mpsc::Receiver<HidReq>) -> eyre::Result<()> {
     let hid = Hid::new()?;
 
     struct Device<'a> {
@@ -211,9 +211,8 @@ fn hid_thread(receiver: kanal::Receiver<HidReq>) -> eyre::Result<()> {
         let req = match receiver.recv_timeout(next_poll - now) {
             Ok(req) => Some(req),
             Err(e) => match e {
-                kanal::ReceiveErrorTimeout::Closed => break,
-                kanal::ReceiveErrorTimeout::SendClosed => break,
-                kanal::ReceiveErrorTimeout::Timeout => None,
+                mpsc::RecvTimeoutError::Disconnected => break,
+                mpsc::RecvTimeoutError::Timeout => None,
             },
         };
 

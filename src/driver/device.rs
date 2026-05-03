@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ type Message = [u8; 64];
 pub struct Device<'a> {
     hid_device: HidDevice<'a>,
     mailbox: Arc<Mailbox>,
-    closed_receiver: kanal::Receiver<()>,
+    closed_receiver: mpsc::Receiver<()>,
 }
 
 impl<'a> Device<'a> {
@@ -22,7 +22,7 @@ impl<'a> Device<'a> {
         let device = hid.open(vendor_id, product_id)?;
         let read_device = device.reader();
 
-        let (closed_sender, closed_receiver) = kanal::bounded(1);
+        let (closed_sender, closed_receiver) = mpsc::sync_channel(1);
 
         let mailbox = Arc::new(Mailbox::new());
 
