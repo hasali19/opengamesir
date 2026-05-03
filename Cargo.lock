@@ -514,6 +514,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fixed-vec-deque"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ed20dca398154f12a72106dfef4ec6478b322345c8988abb6a0ae0a48ebfa5"
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -927,6 +933,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
+ "fixed-vec-deque",
  "futures",
  "hidapi-sys",
  "kanal",

@@ -3,15 +3,23 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use eyre::Context;
 use futures::StreamExt;
+use opengamesir::driver::Cyclone2;
+use opengamesir::hid::Hid;
 use opengamesir::udev::{DeviceAction, DeviceMonitor};
 use parking_lot::Mutex;
 use serde::Serialize;
+use tokio::sync::oneshot;
 use tracing::level_filters::LevelFilter;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use zbus::fdo::ObjectManager;
 use zbus::interface;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, Type};
@@ -30,6 +38,7 @@ async fn main() -> eyre::Result<()> {
     color_eyre::install()?;
 
     tracing_subscriber::fmt()
+        .with_thread_names(true)
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::WARN.into())
@@ -44,6 +53,7 @@ async fn main() -> eyre::Result<()> {
 
     let connection = zbus::connection::Builder::session()?
         .name("dev.hasali.OpenGameSir")?
+        .serve_at("/dev/hasali/OpenGameSir", ObjectManager)?
         .serve_at("/dev/hasali/OpenGameSir/Devices", devices_iface)?
         .build()
         .await?;
@@ -52,6 +62,16 @@ async fn main() -> eyre::Result<()> {
         .object_server()
         .interface("/dev/hasali/OpenGameSir/Devices")
         .await?;
+
+    let (hid_sender, hid_receiver) = kanal::unbounded();
+
+    thread::Builder::new()
+        .name("hid".to_owned())
+        .spawn(move || {
+            if let Err(e) = hid_thread(hid_receiver) {
+                eprintln!("{e:?}");
+            }
+        })?;
 
     tokio::spawn(async move {
         let monitor = match DeviceMonitor::new(0x3537) {
@@ -99,12 +119,24 @@ async fn main() -> eyre::Result<()> {
                             friendly_name: product,
                         };
 
+                        let battery_level= Arc::new(AtomicU8::new(0));
+                        let (init_sender, init_receiver) = oneshot::channel();
+
+                        hid_sender.send(HidReq::AddDevice {
+                            syspath: event.device.syspath.clone(),
+                            battery_level: battery_level.clone(),
+                            reply_sender: init_sender,
+                        })?;
+
+                        init_receiver.await??;
+
                         connection
                             .object_server()
                             .at(
                                 object_path,
                                 Device {
                                     _info: device.clone(),
+                                    battery_level: battery_level,
                                 },
                             )
                             .await?;
@@ -123,6 +155,10 @@ async fn main() -> eyre::Result<()> {
 
                         info!("Removed {product}, vid={vid}, pid={pid}");
 
+                        hid_sender.send(HidReq::RemoveDevice {
+                            syspath: event.device.syspath.clone(),
+                        })?;
+
                         connection
                             .object_server()
                             .remove::<Device, _>(&device.path)
@@ -134,7 +170,7 @@ async fn main() -> eyre::Result<()> {
             };
 
             if let Err(e) = res {
-                error!("Failed to process event: {e}");
+                error!("Failed to process event: {e:?}");
             }
         }
 
@@ -142,6 +178,104 @@ async fn main() -> eyre::Result<()> {
     });
 
     tokio::signal::ctrl_c().await?;
+
+    Ok(())
+}
+
+enum HidReq {
+    AddDevice {
+        syspath: PathBuf,
+        battery_level: Arc<AtomicU8>,
+        reply_sender: oneshot::Sender<eyre::Result<()>>,
+    },
+    RemoveDevice {
+        syspath: PathBuf,
+    },
+}
+
+fn hid_thread(receiver: kanal::Receiver<HidReq>) -> eyre::Result<()> {
+    let hid = Hid::new()?;
+
+    struct Device<'a> {
+        syspath: PathBuf,
+        c2: Cyclone2<'a>,
+        battery_level: Arc<AtomicU8>,
+    }
+
+    let mut devices = vec![];
+
+    let mut next_poll = Instant::now() + Duration::from_secs(60);
+    loop {
+        let now = Instant::now();
+
+        let req = match receiver.recv_timeout(next_poll - now) {
+            Ok(req) => Some(req),
+            Err(e) => match e {
+                kanal::ReceiveErrorTimeout::Closed => break,
+                kanal::ReceiveErrorTimeout::SendClosed => break,
+                kanal::ReceiveErrorTimeout::Timeout => None,
+            },
+        };
+
+        if let Some(req) = req {
+            match req {
+                HidReq::AddDevice {
+                    syspath,
+                    battery_level,
+                    reply_sender,
+                } => {
+                    debug!(?syspath, "Adding device");
+
+                    // TODO: Connect using syspath
+                    let mut c2 = Cyclone2::connect(&hid).wrap_err("Failed to connect to device")?;
+
+                    // TODO: Avoid duplication with below
+                    match c2.heartbeat() {
+                        Ok(state) => {
+                            battery_level.store(state.battery_level, Ordering::Release);
+
+                            let _ = reply_sender.send(Ok(()));
+
+                            devices.push(Device {
+                                syspath,
+                                c2,
+                                battery_level,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = reply_sender.send(Err(e));
+                        }
+                    }
+                }
+                HidReq::RemoveDevice { syspath } => {
+                    debug!(?syspath, "Removing device");
+
+                    devices.retain(|device| device.syspath != syspath);
+                }
+            }
+        }
+
+        if now >= next_poll {
+            devices.retain_mut(|device| {
+                debug!(?device.syspath, "Polling device");
+
+                let Ok(state) = device.c2.heartbeat() else {
+                    error!(?device.syspath, "Failed to send heartbeat");
+                    return false;
+                };
+
+                device
+                    .battery_level
+                    .store(state.battery_level, Ordering::Release);
+
+                true
+            });
+
+            next_poll = now + Duration::from_secs(60);
+        }
+    }
+
+    debug!("HID thread terminating");
 
     Ok(())
 }
@@ -174,7 +308,13 @@ struct DeviceInfo {
 
 struct Device {
     _info: DeviceInfo,
+    battery_level: Arc<AtomicU8>,
 }
 
 #[interface(name = "dev.hasali.OpenGameSir.Device")]
-impl Device {}
+impl Device {
+    #[zbus(property)]
+    fn battery_level(&self) -> u8 {
+        self.battery_level.load(Ordering::Acquire)
+    }
+}

@@ -4,7 +4,7 @@ mod profile;
 use std::io::{Cursor, Write};
 use std::time::Duration;
 
-use eyre::ensure;
+use eyre::{ensure, eyre};
 use tracing::debug;
 
 use crate::driver::device::{Device, TimeoutError};
@@ -21,6 +21,11 @@ pub struct FirmwareVersion {
     pub dongle: String,
 }
 
+pub struct Cyclone2State {
+    pub is_charging: bool,
+    pub battery_level: u8,
+}
+
 impl<'a> Cyclone2<'a> {
     pub fn connect(hid: &'a Hid) -> eyre::Result<Cyclone2<'a>> {
         Ok(Cyclone2 {
@@ -28,7 +33,26 @@ impl<'a> Cyclone2<'a> {
         })
     }
 
-    pub fn get_firmware_version(&self) -> eyre::Result<FirmwareVersion> {
+    pub fn heartbeat(&mut self) -> eyre::Result<Cyclone2State> {
+        self.device.write(&[0xf, 0xf2, 0])?;
+
+        let res = self
+            .device
+            .read_timeout(Duration::from_millis(200))
+            .map_err(|_| eyre!("Failed to read device state"))?;
+
+        ensure!(res[0] == 0x12);
+
+        let charge_state = res[35];
+        let battery_level = res[36];
+
+        Ok(Cyclone2State {
+            is_charging: charge_state != 0,
+            battery_level,
+        })
+    }
+
+    pub fn get_firmware_version(&mut self) -> eyre::Result<FirmwareVersion> {
         let res = self.write_acked_with_retry(&[0x0f, 0x09])?;
 
         ensure!(&res[0..2] == &[0x10, 0x0a]);
@@ -42,14 +66,14 @@ impl<'a> Cyclone2<'a> {
         })
     }
 
-    pub fn get_control_profile(&self, num: ProfileNum) -> eyre::Result<ControlProfile> {
+    pub fn get_control_profile(&mut self, num: ProfileNum) -> eyre::Result<ControlProfile> {
         let profile_bytes = self.read_profile(ProfileId::Num(num), 680)?;
         let mut cursor = Cursor::new(&profile_bytes);
         ControlProfile::read(&mut cursor)
     }
 
     pub fn set_control_profile(
-        &self,
+        &mut self,
         num: ProfileNum,
         profile: &ControlProfile,
     ) -> eyre::Result<()> {
@@ -58,19 +82,19 @@ impl<'a> Cyclone2<'a> {
         self.write_profile(ProfileId::Num(num), &bytes)
     }
 
-    pub fn get_light_profile(&self) -> eyre::Result<LightProfile> {
+    pub fn get_light_profile(&mut self) -> eyre::Result<LightProfile> {
         let profile_bytes = self.read_profile(ProfileId::Light, 635)?;
         let mut cursor = Cursor::new(&profile_bytes);
         LightProfile::read(&mut cursor)
     }
 
-    pub fn set_light_profile(&self, profile: &LightProfile) -> eyre::Result<()> {
+    pub fn set_light_profile(&mut self, profile: &LightProfile) -> eyre::Result<()> {
         let mut bytes = Vec::with_capacity(635);
         profile.write(&mut bytes)?;
         self.write_profile(ProfileId::Light, &bytes)
     }
 
-    fn read_profile(&self, id: ProfileId, size: usize) -> eyre::Result<Vec<u8>> {
+    fn read_profile(&mut self, id: ProfileId, size: usize) -> eyre::Result<Vec<u8>> {
         let profile_size = size as u16;
 
         let chunk_size = 58u16;
@@ -107,7 +131,7 @@ impl<'a> Cyclone2<'a> {
         Ok(profile_bytes)
     }
 
-    fn write_profile(&self, id: ProfileId, bytes: &[u8]) -> eyre::Result<()> {
+    fn write_profile(&mut self, id: ProfileId, bytes: &[u8]) -> eyre::Result<()> {
         let profile_size = bytes.len();
 
         let chunk_size = 58usize;
@@ -146,14 +170,20 @@ impl<'a> Cyclone2<'a> {
 
     /// Sends a command, expecting an ack. If no ack is received within the
     /// time limit, the command is resent.
-    fn write_acked_with_retry(&self, req: &[u8]) -> eyre::Result<[u8; 64]> {
+    fn write_acked_with_retry(&mut self, req: &[u8]) -> eyre::Result<[u8; 64]> {
         loop {
             self.device.write(req)?;
-            match self.device.read_timeout(Duration::from_millis(200)) {
-                Ok(res) => return Ok(res),
-                Err(TimeoutError::Timeout) => debug!("Request timed out, retrying"),
-                Err(TimeoutError::Other(e)) => return Err(e),
-            };
+            loop {
+                match self.device.read_timeout(Duration::from_millis(200)) {
+                    Ok([18, ..]) => debug!("Ignoring state message"),
+                    Ok(res) => return Ok(res),
+                    Err(TimeoutError::Timeout) => {
+                        debug!("Request timed out, retrying");
+                        break;
+                    }
+                    Err(TimeoutError::Other(e)) => return Err(e),
+                };
+            }
         }
     }
 }
